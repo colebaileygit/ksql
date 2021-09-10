@@ -156,8 +156,7 @@ public class QueryStreamWriterTest {
         queryMetadata,
         1000,
         objectMapper,
-        new CompletableFuture<>(),
-        () -> true
+        new CompletableFuture<>()
     );
 
     out = new ByteArrayOutputStream();

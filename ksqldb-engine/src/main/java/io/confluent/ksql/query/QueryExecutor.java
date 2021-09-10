@@ -19,6 +19,8 @@ import static io.confluent.ksql.util.KsqlConfig.KSQL_SHUTDOWN_TIMEOUT_MS_CONFIG;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import io.confluent.ksql.GenericRow;
 import io.confluent.ksql.config.SessionConfig;
@@ -66,11 +68,17 @@ import io.confluent.ksql.util.SharedKafkaStreamsRuntime;
 import io.confluent.ksql.util.SharedKafkaStreamsRuntimeImpl;
 import io.confluent.ksql.util.TransientQueryMetadata;
 import io.confluent.ksql.util.ValidationSharedKafkaStreamsRuntimeImpl;
+import io.vertx.core.impl.ConcurrentHashSet;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
@@ -79,12 +87,23 @@ import java.util.UUID;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.streams.StreamsBuilder;
 import org.apache.kafka.streams.StreamsConfig;
 import org.apache.kafka.streams.Topology;
 import org.apache.kafka.streams.kstream.KStream;
 import org.apache.kafka.streams.kstream.KTable;
+import org.apache.kafka.streams.processor.PunctuationType;
+import org.apache.kafka.streams.processor.Punctuator;
+import org.apache.kafka.streams.processor.api.Processor;
+import org.apache.kafka.streams.processor.api.ProcessorContext;
+import org.apache.kafka.streams.processor.api.ProcessorSupplier;
+import org.apache.kafka.streams.processor.api.Record;
+import org.apache.kafka.streams.processor.api.RecordMetadata;
+import org.apache.kafka.streams.processor.internals.ProcessorContextImpl;
+import org.apache.kafka.streams.processor.internals.StreamTask;
 import org.apache.kafka.streams.processor.internals.namedtopology.NamedTopology;
 import org.apache.kafka.streams.processor.internals.namedtopology.NamedTopologyStreamsBuilder;
 
@@ -169,7 +188,8 @@ final class QueryExecutor {
       final Optional<WindowInfo> windowInfo,
       final boolean excludeTombstones,
       final QueryMetadata.Listener listener,
-      final StreamsBuilder streamsBuilder
+      final StreamsBuilder streamsBuilder,
+      final Optional<ImmutableMap<TopicPartition, Long>> endOffsets
   ) {
     final KsqlConfig ksqlConfig = config.getConfig(true);
     final String applicationId = QueryApplicationId.build(ksqlConfig, false, queryId);
@@ -181,7 +201,7 @@ final class QueryExecutor {
 
     final Map<String, Object> streamsProperties = buildStreamsProperties(applicationId, queryId);
     final Object buildResult = buildQueryImplementation(physicalPlan, runtimeBuildContext);
-    final BlockingRowQueue queue = buildTransientQueryQueue(buildResult, limit, excludeTombstones);
+    final TransientQueryQueue queue = buildTransientQueryQueue(buildResult, limit, excludeTombstones, endOffsets);
     final Topology topology = streamsBuilder.build(PropertiesUtil.asProperties(streamsProperties));
 
     final TransientQueryMetadata.ResultType resultType = buildResult instanceof KTableHolder
@@ -510,17 +530,95 @@ final class QueryExecutor {
   private static TransientQueryQueue buildTransientQueryQueue(
       final Object buildResult,
       final OptionalInt limit,
-      final boolean excludeTombstones
+      final boolean excludeTombstones,
+      final Optional<ImmutableMap<TopicPartition, Long>> endOffsets
   ) {
+    // If we are supposed to stop at the endOffsets, but we didn't get any, then we should
+    // stop immediately. Sadly, we could actually avoid starting the Streams app completely,
+    // but
     final TransientQueryQueue queue = new TransientQueryQueue(limit);
 
     if (buildResult instanceof KStreamHolder<?>) {
       final KStream<?, GenericRow> kstream = ((KStreamHolder<?>) buildResult).getStream();
-
+      final ConcurrentHashSet<TopicPartition> donePartitions = new ConcurrentHashSet<>();
       kstream
-          // Null value for a stream is invalid:
-          .filter((k, v) -> v != null)
-          .foreach((k, v) -> queue.acceptRow(null, v));
+          .process(new ProcessorSupplier<Object, GenericRow, Void, Void>() {
+            @Override
+            public Processor<Object, GenericRow, Void, Void> get() {
+              return new Processor<Object, GenericRow, Void, Void>() {
+                private ProcessorContext<Void, Void> context;
+
+                @Override
+                public void init(final ProcessorContext<Void, Void> context) {
+                  Processor.super.init(context);
+                  this.context = context;
+                  if (endOffsets.isPresent()) {
+                    // registering a punctuation here is the easiest way to check
+                    // if we're complete even if we don't see all records.
+                    // The in-line check in process() is faster,
+                    // but some records may be filtered out before reaching us.
+                    context.schedule(
+                        Duration.ofMillis(100),
+                        PunctuationType.WALL_CLOCK_TIME,
+                        timestamp -> checkCompletion()
+                    );
+                  }
+                }
+
+                @Override
+                public void process(final Record<Object, GenericRow> record) {
+                  // We ignore null values in streams as invalid data.
+                  if (record.value() != null) {
+                    queue.acceptRow(null, record.value());
+                  }
+
+                  checkCompletion();
+                }
+
+                private void checkCompletion() {
+                  if (endOffsets.isPresent()) {
+                    final Map<TopicPartition, OffsetAndMetadata> currentPositions = getCurrentPositions();
+                    for (final Entry<TopicPartition, Long> entry : endOffsets.get().entrySet()) {
+                      if (currentPositions.containsKey(entry.getKey())) {
+                        final OffsetAndMetadata current = currentPositions.get(entry.getKey());
+                        if (current != null && current.offset() >= entry.getValue()) {
+                          queue.complete();
+                          break;
+                        }
+                      }
+                    }
+                  }
+                }
+
+                private Long getCurrentPosition(final TopicPartition topicPartition) {
+                  final OffsetAndMetadata offsetAndMetadata =
+                      getCurrentPositions().get(topicPartition);
+                  return offsetAndMetadata == null ? null : offsetAndMetadata.offset();
+                }
+
+                private Map<TopicPartition, OffsetAndMetadata> getCurrentPositions() {
+                  try {
+                    if (context.getClass().equals(ProcessorContextImpl.class)) {
+                      final Field streamTask;
+                      streamTask = ProcessorContextImpl.class.getDeclaredField("streamTask");
+                      streamTask.setAccessible(true);
+                      final StreamTask task = (StreamTask) streamTask.get(context);
+                      final Method committableOffsetsAndMetadata =
+                          StreamTask.class.getDeclaredMethod("committableOffsetsAndMetadata");
+                      committableOffsetsAndMetadata.setAccessible(true);
+                      final Map<TopicPartition, OffsetAndMetadata> currentPositions =
+                          (Map<TopicPartition, OffsetAndMetadata>) committableOffsetsAndMetadata.invoke(task);
+                      return currentPositions;
+                    } else {
+                      throw new IllegalStateException("Expected only to run in a real Streams application");
+                    }
+                  } catch (final NoSuchFieldException | IllegalAccessException | NoSuchMethodException | InvocationTargetException e) {
+                    throw new RuntimeException(e);
+                  }
+                }
+              };
+            }
+          });
 
     } else if (buildResult instanceof KTableHolder<?>) {
       final KTable<?, GenericRow> ktable = ((KTableHolder<?>) buildResult).getTable();

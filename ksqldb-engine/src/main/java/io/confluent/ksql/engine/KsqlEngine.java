@@ -314,7 +314,7 @@ public class KsqlEngine implements KsqlExecutionContext, Closeable {
     try {
       final TransientQueryMetadata query = EngineExecutor
           .create(primaryContext, serviceContext, statement.getSessionConfig())
-          .executeTransientQuery(statement, excludeTombstones);
+          .executeTransientQuery(statement, excludeTombstones, Optional.empty());
       return query;
     } catch (final KsqlStatementException e) {
       throw e;
@@ -365,14 +365,16 @@ public class KsqlEngine implements KsqlExecutionContext, Closeable {
             .put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest")
             .put(StreamsConfig.NUM_STREAM_THREADS_CONFIG, 1)
             .put(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG, 100)
+            // There's no point in EOS, since this query only produces side effects.
+            .put(StreamsConfig.PROCESSING_GUARANTEE_CONFIG, StreamsConfig.AT_LEAST_ONCE)
             .build()
     );
+    final ImmutableMap<TopicPartition, Long> endOffsets =
+        getQueryInputEndOffsets(analysis, serviceContext.getAdminClient());
+
     final TransientQueryMetadata transientQueryMetadata = EngineExecutor
         .create(primaryContext, serviceContext, statement.getSessionConfig())
-        .executeTransientQuery(statement, excludeTombstones);
-
-    final ImmutableMap<TopicPartition, Long> endOffsets =
-        getQueryInputEndOffsets(analysis, statement, serviceContext.getAdminClient());
+        .executeTransientQuery(statement, excludeTombstones, Optional.of(endOffsets));
 
     QueryLogger.info(
         "Streaming stream pull query results '{}'",
@@ -384,18 +386,24 @@ public class KsqlEngine implements KsqlExecutionContext, Closeable {
 
   public boolean passedEndOffsets(final StreamPullQueryMetadata streamPullQueryMetadata) {
 
+    final Map<TopicPartition, Long> endOffsets = streamPullQueryMetadata.getEndOffsets();
+    final String queryApplicationId = streamPullQueryMetadata.getTransientQueryMetadata().getQueryApplicationId();
+    return passedEndOffsets(endOffsets, queryApplicationId);
+  }
+
+  private boolean passedEndOffsets(final Map<TopicPartition, Long> endOffsets,
+      final String queryApplicationId) {
     try {
       final ListConsumerGroupOffsetsResult result =
           persistentAdminClient.listConsumerGroupOffsets(
-              streamPullQueryMetadata.getTransientQueryMetadata().getQueryApplicationId()
+              queryApplicationId
           );
 
       final Map<TopicPartition, OffsetAndMetadata> metadataMap =
           result.partitionsToOffsetAndMetadata().get();
 
-      final Map<TopicPartition, Long> endOffsets = streamPullQueryMetadata.getEndOffsets();
 
-      for (final Map.Entry<TopicPartition, Long> entry : endOffsets.entrySet()) {
+      for (final Entry<TopicPartition, Long> entry : endOffsets.entrySet()) {
         final OffsetAndMetadata offsetAndMetadata = metadataMap.get(entry.getKey());
         if (offsetAndMetadata == null || offsetAndMetadata.offset() < entry.getValue()) {
           log.debug("SPQ waiting on " + entry + " at " + offsetAndMetadata);
@@ -410,7 +418,6 @@ public class KsqlEngine implements KsqlExecutionContext, Closeable {
 
   private ImmutableMap<TopicPartition, Long> getQueryInputEndOffsets(
       final ImmutableAnalysis analysis,
-      final ConfiguredStatement<Query> statement,
       final Admin admin) {
 
     final String sourceTopicName = analysis.getFrom().getDataSource().getKafkaTopicName();
@@ -419,21 +426,9 @@ public class KsqlEngine implements KsqlExecutionContext, Closeable {
         sourceTopicName
     );
 
-    final Object processingGuarantee = statement
-        .getSessionConfig()
-        .getConfig(true)
-        .getKsqlStreamConfigProps()
-        .get(StreamsConfig.PROCESSING_GUARANTEE_CONFIG);
-
-    final IsolationLevel isolationLevel =
-        StreamsConfig.AT_LEAST_ONCE.equals(processingGuarantee)
-            ? IsolationLevel.READ_UNCOMMITTED
-            : IsolationLevel.READ_COMMITTED;
-
     return getEndOffsets(
         admin,
-        topicDescription,
-        isolationLevel
+        topicDescription
     );
   }
 
@@ -459,8 +454,7 @@ public class KsqlEngine implements KsqlExecutionContext, Closeable {
 
   private ImmutableMap<TopicPartition, Long> getEndOffsets(
       final Admin admin,
-      final TopicDescription topicDescription,
-      final IsolationLevel isolationLevel) {
+      final TopicDescription topicDescription) {
     final Map<TopicPartition, OffsetSpec> topicPartitions =
         topicDescription
             .partitions()
@@ -471,7 +465,7 @@ public class KsqlEngine implements KsqlExecutionContext, Closeable {
     final ListOffsetsResult listOffsetsResult = admin.listOffsets(
         topicPartitions,
         new ListOffsetsOptions(
-            isolationLevel
+            IsolationLevel.READ_UNCOMMITTED
         )
     );
 

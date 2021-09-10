@@ -540,7 +540,7 @@ public class QueryRegistryImplTest {
     final TransientQueryMetadata query = mock(TransientQueryMetadata.class);
     when(query.getQueryId()).thenReturn(queryId);
     when(executor.buildTransientQuery(
-        any(), any(), any(), any(), any(), any(), any(), any(), anyBoolean(), any(), any())
+        any(), any(), any(), any(), any(), any(), any(), any(), anyBoolean(), any(), any(), any())
     ).thenReturn(query);
     registry.createTransientQuery(
         config,
@@ -555,7 +555,8 @@ public class QueryRegistryImplTest {
         mock(LogicalSchema.class),
         OptionalInt.of(123),
         Optional.empty(),
-        false
+        false,
+        Optional.empty()
     );
     return query;
   }

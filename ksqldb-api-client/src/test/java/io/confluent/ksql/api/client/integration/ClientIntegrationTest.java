@@ -86,6 +86,7 @@ import io.confluent.ksql.serde.FormatFactory;
 import io.confluent.ksql.serde.SerdeFeature;
 import io.confluent.ksql.serde.SerdeFeatures;
 import io.confluent.ksql.util.AppInfo;
+import io.confluent.ksql.util.KsqlConfig;
 import io.confluent.ksql.util.StructuredTypesDataProvider;
 import io.confluent.ksql.util.TestDataProvider;
 import io.vertx.core.Vertx;
@@ -105,10 +106,12 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -175,6 +178,7 @@ public class ClientIntegrationTest {
   private static final String EMPTY_TEST_STREAM_2 = EMPTY_TEST_DATA_PROVIDER_2.sourceName();
 
   private static final String PUSH_QUERY = "SELECT * FROM " + TEST_STREAM + " EMIT CHANGES;";
+  private static final String PULL_QUERY_ON_STREAM = "SELECT * FROM " + TEST_STREAM + ";";
   private static final String PULL_QUERY_ON_TABLE =
       "SELECT * from " + AGG_TABLE + " WHERE K=" + AN_AGG_KEY + ";";
   private static final int PUSH_QUERY_LIMIT_NUM_ROWS = 2;
@@ -369,6 +373,74 @@ public class ClientIntegrationTest {
     }
 
     assertThat(streamedQueryResult.isComplete(), is(false));
+  }
+
+  @Test
+  public void shouldStreamPullQueryOnStreamAsync() throws Exception {
+    // When
+    final StreamedQueryResult streamedQueryResult =
+        client.streamQuery(
+            PULL_QUERY_ON_STREAM,
+            ImmutableMap.of(KsqlConfig.KSQL_QUERY_STREAM_PULL_QUERY_ENABLED, true)
+        ).get();
+
+    // Then
+    assertThat(streamedQueryResult.columnNames(), is(TEST_COLUMN_NAMES));
+    assertThat(streamedQueryResult.columnTypes(), is(TEST_COLUMN_TYPES));
+    assertThat(streamedQueryResult.queryID(), is(notNullValue()));
+
+    shouldReceiveRows(
+        streamedQueryResult,
+        6,
+        rows -> verifyStreamRows(rows, 6),
+        true
+    );
+  }
+
+  @Test
+  public void shouldStreamPullQueryOnStreamSync() throws Exception {
+    // When
+    final StreamedQueryResult streamedQueryResult = client.streamQuery(
+        PULL_QUERY_ON_STREAM,
+        ImmutableMap.of(KsqlConfig.KSQL_QUERY_STREAM_PULL_QUERY_ENABLED, true)
+    ).get();
+
+    // Then
+    assertThat(streamedQueryResult.columnNames(), is(TEST_COLUMN_NAMES));
+    assertThat(streamedQueryResult.columnTypes(), is(TEST_COLUMN_TYPES));
+    assertThat(streamedQueryResult.queryID(), is(notNullValue()));
+
+    final List<Row> results = new LinkedList<>();
+    Row row;
+    while (true) {
+      row = streamedQueryResult.poll();
+      if (row == null) {
+        break;
+      } else {
+        results.add(row);
+      }
+    }
+
+    verifyStreamRows(results, 6);
+
+    assertThatEventually(streamedQueryResult::isComplete, is(true));
+  }
+
+  @Test
+  public void shouldRejectPullQueryOnStreamByDefault() {
+    // When
+    final CompletableFuture<StreamedQueryResult> future = client.streamQuery(PULL_QUERY_ON_STREAM);
+    final ExecutionException exception = assertThrows(ExecutionException.class, future::get);
+
+    assertThat(exception.getCause(), instanceOf(KsqlClientException.class));
+    assertThat(exception.getMessage(), containsString(
+        "Received 400 response from server:"
+            + " Pull queries on streams are disabled."
+            + " To create a push query on the stream, add EMIT CHANGES to the end."
+            + " To enable pull queries on streams,"
+            + " set the ksql.query.pull.stream.enabled config to 'true'.\n"
+            + "Statement: SELECT * FROM STRUCTURED_TYPES_KSTREAM;."
+    ));
   }
 
   @Test

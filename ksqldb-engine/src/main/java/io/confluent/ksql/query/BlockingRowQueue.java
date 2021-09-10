@@ -21,6 +21,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 /**
  * The queue between the Kafka-streams topology and the client connection.
@@ -39,6 +40,8 @@ public interface BlockingRowQueue {
    * @param limitHandler the handler.
    */
   void setLimitHandler(LimitHandler limitHandler);
+
+  void setCompletionHandler(CompletionHandler completionHandler);
 
   /**
    * Sets the callback that will be called any time a new row is accepted into the queue.

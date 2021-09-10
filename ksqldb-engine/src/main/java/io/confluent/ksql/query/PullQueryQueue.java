@@ -26,6 +26,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -80,6 +81,11 @@ public class PullQueryQueue implements BlockingRowQueue {
   @Override
   public void setLimitHandler(final LimitHandler limitHandler) {
     this.limitHandler = limitHandler;
+  }
+
+  @Override
+  public void setCompletionHandler(final CompletionHandler completionHandler) {
+    throw new RuntimeException("unexpected call");
   }
 
   @Override

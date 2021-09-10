@@ -26,6 +26,8 @@ import java.util.OptionalInt;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 
 /**
  * A queue of rows for transient queries.
@@ -36,8 +38,11 @@ public class TransientQueryQueue implements BlockingRowQueue {
 
   private final BlockingQueue<KeyValue<List<?>, GenericRow>> rowQueue;
   private final int offerTimeoutMs;
-  private LimitQueueCallback callback;
   private volatile boolean closed = false;
+  private final AtomicInteger remaining;
+  private LimitHandler limitHandler;
+  private CompletionHandler completionHandler;
+  private Runnable queuedCallback;
 
   public TransientQueryQueue(final OptionalInt limit) {
     this(limit, BLOCKING_QUEUE_CAPACITY, 100);
@@ -49,39 +54,24 @@ public class TransientQueryQueue implements BlockingRowQueue {
       final int queueSizeLimit,
       final int offerTimeoutMs
   ) {
-    this.callback = limit.isPresent()
-        ? new LimitedQueueCallback(limit.getAsInt())
-        : new UnlimitedQueueCallback();
+    this.remaining = limit.isPresent() ? new AtomicInteger(limit.getAsInt()) : null;
     this.rowQueue = new LinkedBlockingQueue<>(queueSizeLimit);
     this.offerTimeoutMs = offerTimeoutMs;
   }
 
   @Override
   public void setLimitHandler(final LimitHandler limitHandler) {
-    callback.setLimitHandler(limitHandler);
+    this.limitHandler = limitHandler;
+  }
+
+  @Override
+  public void setCompletionHandler(final CompletionHandler completionHandler) {
+    this.completionHandler = completionHandler;
   }
 
   @Override
   public void setQueuedCallback(final Runnable queuedCallback) {
-    final LimitQueueCallback parent = callback;
-
-    callback = new LimitQueueCallback() {
-      @Override
-      public boolean shouldQueue() {
-        return parent.shouldQueue();
-      }
-
-      @Override
-      public void onQueued() {
-        parent.onQueued();
-        queuedCallback.run();
-      }
-
-      @Override
-      public void setLimitHandler(final LimitHandler limitHandler) {
-        parent.setLimitHandler(limitHandler);
-      }
-    };
+    this.queuedCallback = queuedCallback;
   }
 
   @Override
@@ -117,7 +107,7 @@ public class TransientQueryQueue implements BlockingRowQueue {
 
   public void acceptRow(final List<?> key, final GenericRow value) {
     try {
-      if (!callback.shouldQueue()) {
+      if (checkLimit()) {
         return;
       }
 
@@ -125,7 +115,12 @@ public class TransientQueryQueue implements BlockingRowQueue {
 
       while (!closed) {
         if (rowQueue.offer(row, offerTimeoutMs, TimeUnit.MILLISECONDS)) {
-          callback.onQueued();
+          if (updateAndCheckLimit()) {
+            limitHandler.limitReached();
+          }
+          if (queuedCallback != null) {
+            queuedCallback.run();
+          }
           break;
         }
       }
@@ -144,7 +139,7 @@ public class TransientQueryQueue implements BlockingRowQueue {
    */
   public boolean acceptRowNonBlocking(final List<?> key, final GenericRow value) {
     try {
-      if (!callback.shouldQueue()) {
+      if (checkLimit()) {
         return true;
       }
 
@@ -154,7 +149,10 @@ public class TransientQueryQueue implements BlockingRowQueue {
         if (!rowQueue.offer(row, 0, TimeUnit.MILLISECONDS)) {
           return false;
         }
-        callback.onQueued();
+        if (updateAndCheckLimit()) {
+          limitHandler.limitReached();
+        }
+        queuedCallback.run();
         return true;
       }
     } catch (final InterruptedException e) {
@@ -167,5 +165,19 @@ public class TransientQueryQueue implements BlockingRowQueue {
 
   public boolean isClosed() {
     return closed;
+  }
+
+  private boolean updateAndCheckLimit() {
+    return remaining != null && remaining.decrementAndGet() <= 0;
+  }
+
+  private boolean checkLimit() {
+    return remaining != null && remaining.get() <= 0;
+  }
+
+  public void complete() {
+    if (completionHandler != null) {
+      completionHandler.complete();
+    }
   }
 }
