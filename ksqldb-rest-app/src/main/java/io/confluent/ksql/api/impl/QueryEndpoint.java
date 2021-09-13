@@ -254,10 +254,6 @@ public class QueryEndpoint {
   ) {
     final BlockingQueryPublisher publisher = new BlockingQueryPublisher(context, workerExecutor);
 
-    PullQueryExecutionUtil.checkRateLimit(rateLimiter);
-    final Decrementer decrementer = pullConcurrencyLimiter.increment();
-    pullBandRateLimiter.allow();
-
     final StreamPullQueryMetadata metadata =
         ksqlEngine.createStreamPullQuery(
             serviceContext,
