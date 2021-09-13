@@ -79,7 +79,6 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Function;
-import java.util.function.Supplier;
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.ListOffsetsOptions;
 import org.apache.kafka.clients.admin.ListOffsetsResult;
@@ -105,12 +104,9 @@ public class KsqlEngine implements KsqlExecutionContext, Closeable {
   private final EngineContext primaryContext;
   private final QueryCleanupService cleanupService;
   private final OrphanedTransientQueryCleaner orphanedTransientQueryCleaner;
-  private final KsqlConfig ksqlConfig;
-  private final Admin persistentAdminClient;
 
   public KsqlEngine(
       final ServiceContext serviceContext,
-      final Supplier<Admin> adminSupplier,
       final ProcessingLogContext processingLogContext,
       final FunctionRegistry functionRegistry,
       final ServiceInfo serviceInfo,
@@ -129,7 +125,6 @@ public class KsqlEngine implements KsqlExecutionContext, Closeable {
             serviceInfo.customMetricsTags(),
             serviceInfo.metricsExtension()
         ),
-        adminSupplier,
         queryIdGenerator,
         ksqlConfig,
         queryEventListeners
@@ -143,7 +138,6 @@ public class KsqlEngine implements KsqlExecutionContext, Closeable {
       final String serviceId,
       final MutableMetaStore metaStore,
       final Function<KsqlEngine, KsqlEngineMetrics> engineMetricsFactory,
-      final Supplier<Admin> adminSupplier,
       final QueryIdGenerator queryIdGenerator,
       final KsqlConfig ksqlConfig,
       final List<QueryEventListener> queryEventListeners
@@ -179,8 +173,6 @@ public class KsqlEngine implements KsqlExecutionContext, Closeable {
         1000,
         TimeUnit.MILLISECONDS
     );
-    this.ksqlConfig = ksqlConfig;
-    this.persistentAdminClient = adminSupplier.get();
 
     cleanupService.startAsync();
   }
@@ -517,7 +509,7 @@ public class KsqlEngine implements KsqlExecutionContext, Closeable {
 
     try {
       cleanupService.stopAsync().awaitTerminated(30, TimeUnit.SECONDS);
-    } catch (TimeoutException e) {
+    } catch (final TimeoutException e) {
       log.warn("Timed out while closing cleanup service. "
               + "External resources for the following applications may be orphaned: {}",
           cleanupService.pendingApplicationIds()
@@ -526,7 +518,6 @@ public class KsqlEngine implements KsqlExecutionContext, Closeable {
 
     engineMetrics.close();
     aggregateMetricsCollector.shutdown();
-    persistentAdminClient.close();
   }
 
   @Override
