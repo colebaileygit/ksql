@@ -96,12 +96,10 @@ import org.apache.kafka.streams.Topology;
 import org.apache.kafka.streams.kstream.KStream;
 import org.apache.kafka.streams.kstream.KTable;
 import org.apache.kafka.streams.processor.PunctuationType;
-import org.apache.kafka.streams.processor.Punctuator;
 import org.apache.kafka.streams.processor.api.Processor;
 import org.apache.kafka.streams.processor.api.ProcessorContext;
 import org.apache.kafka.streams.processor.api.ProcessorSupplier;
 import org.apache.kafka.streams.processor.api.Record;
-import org.apache.kafka.streams.processor.api.RecordMetadata;
 import org.apache.kafka.streams.processor.internals.ProcessorContextImpl;
 import org.apache.kafka.streams.processor.internals.StreamTask;
 import org.apache.kafka.streams.processor.internals.namedtopology.NamedTopology;
@@ -201,7 +199,8 @@ final class QueryExecutor {
 
     final Map<String, Object> streamsProperties = buildStreamsProperties(applicationId, queryId);
     final Object buildResult = buildQueryImplementation(physicalPlan, runtimeBuildContext);
-    final TransientQueryQueue queue = buildTransientQueryQueue(buildResult, limit, excludeTombstones, endOffsets);
+    final TransientQueryQueue queue =
+        buildTransientQueryQueue(buildResult, limit, excludeTombstones, endOffsets);
     final Topology topology = streamsBuilder.build(PropertiesUtil.asProperties(streamsProperties));
 
     final TransientQueryMetadata.ResultType resultType = buildResult instanceof KTableHolder
@@ -542,92 +541,10 @@ final class QueryExecutor {
       final KStream<?, GenericRow> kstream = ((KStreamHolder<?>) buildResult).getStream();
       // The list of "done partitions" is shared among all the stream threads and tasks.
       final ConcurrentHashSet<TopicPartition> donePartitions = new ConcurrentHashSet<>();
-      kstream
-          .process(new ProcessorSupplier<Object, GenericRow, Void, Void>() {
-            @Override
-            public Processor<Object, GenericRow, Void, Void> get() {
-              return new Processor<Object, GenericRow, Void, Void>() {
-                private ProcessorContext<Void, Void> context;
-
-                @Override
-                public void init(final ProcessorContext<Void, Void> context) {
-                  Processor.super.init(context);
-                  this.context = context;
-                  if (endOffsets.isPresent()) {
-                    // registering a punctuation here is the easiest way to check
-                    // if we're complete even if we don't see all records.
-                    // The in-line check in process() is faster,
-                    // but some records may be filtered out before reaching us.
-                    context.schedule(
-                        Duration.ofMillis(100),
-                        PunctuationType.WALL_CLOCK_TIME,
-                        timestamp -> checkCompletion()
-                    );
-                  }
-                }
-
-                @Override
-                public void process(final Record<Object, GenericRow> record) {
-                  final Optional<TopicPartition> topicPartition =
-                      context
-                          .recordMetadata()
-                          .map(m -> new TopicPartition(m.topic(), m.partition()));
-
-                  final boolean alreadyDone =
-                      topicPartition.isPresent() && donePartitions.contains(topicPartition.get());
-
-                  // We ignore null values in streams as invalid data and drop the record.
-                  // If we're already done with the current partition, we just drop the record.
-                  if (record.value() != null && !alreadyDone) {
-                    queue.acceptRow(null, record.value());
-                  }
-
-                  checkCompletion();
-                }
-
-                private void checkCompletion() {
-                  if (endOffsets.isPresent()) {
-                    final Map<TopicPartition, OffsetAndMetadata> currentPositions =
-                        getCurrentPositions();
-
-                    for (final Entry<TopicPartition, Long> end : endOffsets.get().entrySet()) {
-                      if (currentPositions.containsKey(end.getKey())) {
-                        final OffsetAndMetadata current = currentPositions.get(end.getKey());
-                        if (current != null && current.offset() >= end.getValue()) {
-                          donePartitions.add(end.getKey());
-                        }
-                      }
-                    }
-                    // if we're completely done with this query, then call the completion handler.
-                    if (ImmutableSet.copyOf(donePartitions).equals(endOffsets.get().keySet())) {
-                      queue.complete();
-                    }
-                  }
-                }
-
-                private Map<TopicPartition, OffsetAndMetadata> getCurrentPositions() {
-                  try {
-                    if (context.getClass().equals(ProcessorContextImpl.class)) {
-                      final Field streamTask;
-                      streamTask = ProcessorContextImpl.class.getDeclaredField("streamTask");
-                      streamTask.setAccessible(true);
-                      final StreamTask task = (StreamTask) streamTask.get(context);
-                      final Method committableOffsetsAndMetadata =
-                          StreamTask.class.getDeclaredMethod("committableOffsetsAndMetadata");
-                      committableOffsetsAndMetadata.setAccessible(true);
-                      final Map<TopicPartition, OffsetAndMetadata> currentPositions =
-                          (Map<TopicPartition, OffsetAndMetadata>) committableOffsetsAndMetadata.invoke(task);
-                      return currentPositions;
-                    } else {
-                      throw new IllegalStateException("Expected only to run in a real Streams application");
-                    }
-                  } catch (final NoSuchFieldException | IllegalAccessException | NoSuchMethodException | InvocationTargetException e) {
-                    throw new RuntimeException(e);
-                  }
-                }
-              };
-            }
-          });
+      kstream.process(
+          (ProcessorSupplier<Object, GenericRow, Void, Void>) () ->
+              new TransientQuerySinkProcessor(queue, endOffsets, donePartitions)
+      );
 
     } else if (buildResult instanceof KTableHolder<?>) {
       final KTable<?, GenericRow> ktable = ((KTableHolder<?>) buildResult).getTable();
@@ -753,5 +670,108 @@ final class QueryExecutor {
     }
     valueList.add(value);
     properties.put(key, valueList);
+  }
+
+  private static class TransientQuerySinkProcessor implements
+      Processor<Object, GenericRow, Void, Void> {
+
+    private final TransientQueryQueue queue;
+    private final Optional<ImmutableMap<TopicPartition, Long>> endOffsets;
+    private final ConcurrentHashSet<TopicPartition> donePartitions;
+    private ProcessorContext<Void, Void> context;
+
+    TransientQuerySinkProcessor(
+        final TransientQueryQueue queue,
+        final Optional<ImmutableMap<TopicPartition, Long>> endOffsets,
+        final ConcurrentHashSet<TopicPartition> donePartitions) {
+
+      this.queue = queue;
+      this.endOffsets = endOffsets;
+      this.donePartitions = donePartitions;
+    }
+
+    @Override
+    public void init(final ProcessorContext<Void, Void> context) {
+      Processor.super.init(context);
+      this.context = context;
+      if (endOffsets.isPresent()) {
+        // registering a punctuation here is the easiest way to check
+        // if we're complete even if we don't see all records.
+        // The in-line check in process() is faster,
+        // but some records may be filtered out before reaching us.
+        context.schedule(
+            Duration.ofMillis(100),
+            PunctuationType.WALL_CLOCK_TIME,
+            timestamp -> checkCompletion()
+        );
+      }
+    }
+
+    @Override
+    public void process(final Record<Object, GenericRow> record) {
+      final Optional<TopicPartition> topicPartition =
+          context
+              .recordMetadata()
+              .map(m -> new TopicPartition(m.topic(), m.partition()));
+
+      final boolean alreadyDone =
+          topicPartition.isPresent() && donePartitions.contains(topicPartition.get());
+
+      // We ignore null values in streams as invalid data and drop the record.
+      // If we're already done with the current partition, we just drop the record.
+      if (record.value() != null && !alreadyDone) {
+        queue.acceptRow(null, record.value());
+      }
+
+      checkCompletion();
+    }
+
+    private void checkCompletion() {
+      if (endOffsets.isPresent()) {
+        final Map<TopicPartition, OffsetAndMetadata> currentPositions =
+            getCurrentPositions();
+
+        for (final Entry<TopicPartition, Long> end : endOffsets.get().entrySet()) {
+          if (currentPositions.containsKey(end.getKey())) {
+            final OffsetAndMetadata current = currentPositions.get(end.getKey());
+            if (current != null && current.offset() >= end.getValue()) {
+              donePartitions.add(end.getKey());
+            }
+          }
+        }
+        // if we're completely done with this query, then call the completion handler.
+        if (ImmutableSet.copyOf(donePartitions).equals(endOffsets.get().keySet())) {
+          queue.complete();
+        }
+      }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<TopicPartition, OffsetAndMetadata> getCurrentPositions() {
+      // It might make sense to actually propose adding the concept of getting the
+      // "current position" in the ProcessorContext, but for now we just expose it
+      // by reflection.
+      try {
+        if (context.getClass().equals(ProcessorContextImpl.class)) {
+          final Field streamTask;
+          streamTask = ProcessorContextImpl.class.getDeclaredField("streamTask");
+          streamTask.setAccessible(true);
+          final StreamTask task = (StreamTask) streamTask.get(context);
+          final Method committableOffsetsAndMetadata =
+              StreamTask.class.getDeclaredMethod("committableOffsetsAndMetadata");
+          committableOffsetsAndMetadata.setAccessible(true);
+          return (Map<TopicPartition, OffsetAndMetadata>)
+              committableOffsetsAndMetadata.invoke(task);
+        } else {
+          throw new IllegalStateException(
+              "Expected only to run in a real Streams application"
+          );
+        }
+      } catch (final NoSuchFieldException | IllegalAccessException
+          | NoSuchMethodException | InvocationTargetException e) {
+        throw new RuntimeException(e);
+      }
+    }
+
   }
 }

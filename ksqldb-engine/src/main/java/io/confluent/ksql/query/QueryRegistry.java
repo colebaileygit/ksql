@@ -78,7 +78,7 @@ public interface QueryRegistry {
       OptionalInt limit,
       Optional<WindowInfo> windowInfo,
       boolean excludeTombstones,
-      final Optional<ImmutableMap<TopicPartition, Long>> endOffsets
+      Optional<ImmutableMap<TopicPartition, Long>> endOffsets
   );
   // CHECKSTYLE_RULES.ON: ParameterNumberCheck
 

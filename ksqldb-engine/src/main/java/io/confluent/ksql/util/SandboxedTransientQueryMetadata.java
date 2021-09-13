@@ -19,13 +19,10 @@ import io.confluent.ksql.GenericRow;
 import io.confluent.ksql.query.BlockingRowQueue;
 import io.confluent.ksql.query.CompletionHandler;
 import io.confluent.ksql.query.LimitHandler;
-import io.confluent.ksql.query.TransientQueryQueue;
 import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
-import java.util.OptionalInt;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Supplier;
 
 public final class SandboxedTransientQueryMetadata extends TransientQueryMetadata {
   private SandboxedTransientQueryMetadata(
