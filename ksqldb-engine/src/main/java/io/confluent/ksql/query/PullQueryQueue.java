@@ -85,7 +85,7 @@ public class PullQueryQueue implements BlockingRowQueue {
 
   @Override
   public void setCompletionHandler(final CompletionHandler completionHandler) {
-    throw new RuntimeException("unexpected call");
+    // not used in pull queries.
   }
 
   @Override

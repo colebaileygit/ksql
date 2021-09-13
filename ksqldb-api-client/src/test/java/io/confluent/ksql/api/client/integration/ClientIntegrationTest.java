@@ -34,6 +34,7 @@ import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.fail;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableListMultimap;
@@ -102,10 +103,8 @@ import java.nio.file.Paths;
 import java.sql.Date;
 import java.sql.Time;
 import java.sql.Timestamp;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
@@ -114,7 +113,6 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import kafka.zookeeper.ZooKeeperClientException;
 import org.apache.kafka.connect.data.Struct;
@@ -283,9 +281,9 @@ public class ClientIntegrationTest {
   }
 
   private static void writeConnectConfigs(final String path, final Map<String, String> configs) throws Exception {
-    try (PrintWriter out = new PrintWriter(new OutputStreamWriter(
+    try (final PrintWriter out = new PrintWriter(new OutputStreamWriter(
         new FileOutputStream(path, true), StandardCharsets.UTF_8))) {
-      for (Map.Entry<String, String> entry : configs.entrySet()) {
+      for (final Map.Entry<String, String> entry : configs.entrySet()) {
         out.println(entry.getKey() + "=" + entry.getValue());
       }
     }
@@ -334,7 +332,7 @@ public class ClientIntegrationTest {
     }
 
     for (final StreamedQueryResult streamedQueryResult : streamedQueryResults) {
-      shouldReceiveStreamRows(streamedQueryResult, false);
+      shouldReceiveStreamRows(streamedQueryResult);
     }
 
     for (final StreamedQueryResult streamedQueryResult : streamedQueryResults) {
@@ -352,7 +350,7 @@ public class ClientIntegrationTest {
     assertThat(streamedQueryResult.columnTypes(), is(TEST_COLUMN_TYPES));
     assertThat(streamedQueryResult.queryID(), is(notNullValue()));
 
-    shouldReceiveStreamRows(streamedQueryResult, false);
+    shouldReceiveStreamRows(streamedQueryResult);
 
     assertThat(streamedQueryResult.isComplete(), is(false));
   }
@@ -549,7 +547,7 @@ public class ClientIntegrationTest {
     assertThatEventually(streamedQueryResult::isComplete, is(true));
 
     // When
-    TestSubscriber<Row> subscriber = subscribeAndWait(streamedQueryResult);
+    final TestSubscriber<Row> subscriber = subscribeAndWait(streamedQueryResult);
     assertThat(subscriber.getValues(), hasSize(0));
     subscriber.getSub().request(PUSH_QUERY_LIMIT_NUM_ROWS);
 
@@ -748,119 +746,6 @@ public class ClientIntegrationTest {
   }
 
   @Test
-  public void shouldStreamQueryWithProperties() throws Exception {
-    // Given
-    final Map<String, Object> properties = new HashMap<>();
-    properties.put("auto.offset.reset", "latest");
-    final String sql = "SELECT * FROM " + TEST_STREAM + " EMIT CHANGES LIMIT 1;";
-
-    final KsqlObject insertRow = new KsqlObject()
-        .put("K", new KsqlObject().put("F1", new KsqlArray().add("my_key_shouldStreamQueryWithProperties")))
-        .put("STR", "Value_shouldStreamQueryWithProperties")
-        .put("LONG", 2000L)
-        .put("DEC", new BigDecimal("12.34"))
-        .put("BYTES_", new byte[]{0, 1, 2})
-        .put("ARRAY", new KsqlArray().add("v1_shouldStreamQueryWithProperties").add("v2_shouldStreamQueryWithProperties"))
-        .put("MAP", new KsqlObject().put("test_name", "shouldStreamQueryWithProperties"))
-        .put("STRUCT", new KsqlObject().put("F1", 4))
-        .put("COMPLEX", COMPLEX_FIELD_VALUE)
-        .put("TIMESTAMP", "1970-01-01T00:00:00.001")
-        .put("DATE", "1970-01-01")
-        .put("TIME", "00:00:00");
-
-    // When
-    final StreamedQueryResult queryResult = client.streamQuery(sql, properties).get();
-
-    // Then: a newly inserted row arrives
-    final Row row = assertThatEventually(() -> {
-      // Potentially try inserting multiple times, in case the query wasn't started by the first time
-      try {
-        client.insertInto(TEST_STREAM, insertRow).get();
-      } catch (Exception e) {
-        throw new RuntimeException(e);
-      }
-      return queryResult.poll(Duration.ofMillis(10));
-    }, is(notNullValue()));
-
-    assertThat(row.getKsqlObject("K"), is(new KsqlObject().put("F1", new KsqlArray().add("my_key_shouldStreamQueryWithProperties"))));
-    assertThat(row.getString("STR"), is("Value_shouldStreamQueryWithProperties"));
-    assertThat(row.getLong("LONG"), is(2000L));
-    assertThat(row.getDecimal("DEC"), is(new BigDecimal("12.34")));
-    assertThat(row.getBytes("BYTES_"), is(new byte[]{0, 1, 2}));
-    assertThat(row.getKsqlArray("ARRAY"), is(new KsqlArray().add("v1_shouldStreamQueryWithProperties").add("v2_shouldStreamQueryWithProperties")));
-    assertThat(row.getKsqlObject("MAP"), is(new KsqlObject().put("test_name", "shouldStreamQueryWithProperties")));
-    assertThat(row.getKsqlObject("STRUCT"), is(new KsqlObject().put("F1", 4)));
-    assertThat(row.getKsqlObject("COMPLEX"), is(EXPECTED_COMPLEX_FIELD_VALUE));
-    assertThat(row.getString("TIMESTAMP"), is("1970-01-01T00:00:00.001"));
-    assertThat(row.getString("DATE"), is("1970-01-01"));
-    assertThat(row.getString("TIME"), is("00:00"));
-  }
-
-  @Test
-  public void shouldExecuteQueryWithProperties() {
-    // Given
-    final Map<String, Object> properties = new HashMap<>();
-    properties.put("auto.offset.reset", "latest");
-    final String sql = "SELECT * FROM " + TEST_STREAM + " EMIT CHANGES LIMIT 1;";
-
-    final KsqlObject insertRow = new KsqlObject()
-        .put("K", new KsqlObject().put("F1", new KsqlArray().add("my_key_shouldExecuteQueryWithProperties")))
-        .put("STR", "Value_shouldExecuteQueryWithProperties")
-        .put("LONG", 2000L)
-        .put("DEC", new BigDecimal("12.34"))
-        .put("BYTES_", new byte[]{0, 1, 2})
-        .put("ARRAY", new KsqlArray().add("v1_shouldExecuteQueryWithProperties").add("v2_shouldExecuteQueryWithProperties"))
-        .put("MAP", new KsqlObject().put("test_name", "shouldExecuteQueryWithProperties"))
-        .put("STRUCT", new KsqlObject().put("F1", 4))
-        .put("COMPLEX", COMPLEX_FIELD_VALUE)
-        .put("TIMESTAMP", "1970-01-01T00:00:00.001")
-        .put("DATE", "1970-01-01")
-        .put("TIME", "00:00:00");
-
-    // When
-    final BatchedQueryResult queryResult = client.executeQuery(sql, properties);
-
-    // Then: a newly inserted row arrives
-
-    // Wait for row to arrive
-    final AtomicReference<Row> rowRef = new AtomicReference<>();
-    new Thread(() -> {
-      try {
-        final List<Row> rows = queryResult.get();
-        assertThat(rows, hasSize(1));
-        rowRef.set(rows.get(0));
-      } catch (Exception e) {
-        throw new RuntimeException(e);
-      }
-    }).start();
-
-    // Insert a new row
-    final Row row = assertThatEventually(() -> {
-      // Potentially try inserting multiple times, in case the query wasn't started by the first time
-      try {
-        client.insertInto(TEST_STREAM, insertRow).get();
-      } catch (Exception e) {
-        throw new RuntimeException(e);
-      }
-      return rowRef.get();
-    }, is(notNullValue()));
-
-    // Verify received row
-    assertThat(row.getKsqlObject("K"), is(new KsqlObject().put("F1", new KsqlArray().add("my_key_shouldExecuteQueryWithProperties"))));
-    assertThat(row.getString("STR"), is("Value_shouldExecuteQueryWithProperties"));
-    assertThat(row.getLong("LONG"), is(2000L));
-    assertThat(row.getDecimal("DEC"), is(new BigDecimal("12.34")));
-    assertThat(row.getBytes("BYTES_"), is(new byte[]{0, 1, 2}));
-    assertThat(row.getKsqlArray("ARRAY"), is(new KsqlArray().add("v1_shouldExecuteQueryWithProperties").add("v2_shouldExecuteQueryWithProperties")));
-    assertThat(row.getKsqlObject("MAP"), is(new KsqlObject().put("test_name", "shouldExecuteQueryWithProperties")));
-    assertThat(row.getKsqlObject("STRUCT"), is(new KsqlObject().put("F1", 4)));
-    assertThat(row.getKsqlObject("COMPLEX"), is(EXPECTED_COMPLEX_FIELD_VALUE));
-    assertThat(row.getString("TIMESTAMP"), is("1970-01-01T00:00:00.001"));
-    assertThat(row.getString("DATE"), is("1970-01-01"));
-    assertThat(row.getString("TIME"), is("00:00"));
-  }
-
-  @Test
   public void shouldStreamInserts() throws Exception {
     // Given
     final InsertsPublisher insertsPublisher = new InsertsPublisher();
@@ -869,7 +754,7 @@ public class ClientIntegrationTest {
     // When
     final AcksPublisher acksPublisher = client.streamInserts(EMPTY_TEST_STREAM_2, insertsPublisher).get();
 
-    TestSubscriber<InsertAck> acksSubscriber = subscribeAndWait(acksPublisher);
+    final TestSubscriber<InsertAck> acksSubscriber = subscribeAndWait(acksPublisher);
     assertThat(acksSubscriber.getValues(), hasSize(0));
     acksSubscriber.getSub().request(numRows);
 
@@ -891,7 +776,7 @@ public class ClientIntegrationTest {
     // Then
     assertThatEventually(acksSubscriber::getValues, hasSize(numRows));
     for (int i = 0; i < numRows; i++) {
-      assertThat(acksSubscriber.getValues().get(i).seqNum(), is(Long.valueOf(i)));
+      assertThat(acksSubscriber.getValues().get(i).seqNum(), is((long) i));
     }
     assertThat(acksSubscriber.getError(), is(nullValue()));
     assertThat(acksSubscriber.isCompleted(), is(false));
@@ -908,7 +793,7 @@ public class ClientIntegrationTest {
     for (int i = 0; i < numRows; i++) {
       assertThat(rows.get(i).getKsqlObject("K"), is(new KsqlObject().put("F1", new KsqlArray().add("my_key_" + i))));
       assertThat(rows.get(i).getString("STR"), is("TEST_" + i));
-      assertThat(rows.get(i).getLong("LONG"), is(Long.valueOf(i)));
+      assertThat(rows.get(i).getLong("LONG"), is((long) i));
       assertThat(rows.get(i).getDecimal("DEC"), is(new BigDecimal("13.31")));
       assertThat(rows.get(i).getBytes("BYTES_"), is(new byte[]{0, 1, 2}));
       assertThat(rows.get(i).getKsqlArray("ARRAY"), is(new KsqlArray().add("v_" + i)));
@@ -1088,7 +973,7 @@ public class ClientIntegrationTest {
 
     // Then
     assertThat("" + tables, tables, contains(
-        tableInfo(AGG_TABLE, AGG_TABLE, KEY_FORMAT.name(), VALUE_FORMAT.name(), false)
+        tableInfo(KEY_FORMAT.name(), VALUE_FORMAT.name())
     ));
   }
 
@@ -1245,7 +1130,7 @@ public class ClientIntegrationTest {
     assertThatEventually(() -> {
       try {
         return client.listConnectors().get().size();
-      } catch (InterruptedException | ExecutionException e) {
+      } catch (final InterruptedException | ExecutionException e) {
         return null;
       }
     }, is(0));
@@ -1261,7 +1146,7 @@ public class ClientIntegrationTest {
         () -> {
           try {
             return (client.describeConnector("FOO").get()).state();
-          } catch (InterruptedException | ExecutionException e) {
+          } catch (final InterruptedException | ExecutionException e) {
             return null;
           }
         },
@@ -1280,7 +1165,7 @@ public class ClientIntegrationTest {
         () -> {
           try {
             return (client.describeConnector("FOO").get()).state();
-          } catch (InterruptedException | ExecutionException e) {
+          } catch (final InterruptedException | ExecutionException e) {
             return null;
           }
         },
@@ -1299,7 +1184,7 @@ public class ClientIntegrationTest {
     assertThatEventually(() -> {
       try {
         return client.listStreams().get().size();
-      } catch (Exception e) {
+      } catch (final Exception e) {
         return -1;
       }
     }, is(numStreams));
@@ -1309,7 +1194,7 @@ public class ClientIntegrationTest {
     assertThatEventually(() -> {
       try {
         return client.listQueries().get().size();
-      } catch (Exception e) {
+      } catch (final Exception e) {
         return -1;
       }
     }, is(numQueries));
@@ -1325,7 +1210,7 @@ public class ClientIntegrationTest {
         () -> {
           try {
             return ((ConnectorList) makeKsqlRequest("SHOW CONNECTORS;").get(0)).getConnectors().size();
-          } catch (AssertionError e) {
+          } catch (final AssertionError e) {
             return 0;
           }},
         is(1)
@@ -1356,15 +1241,14 @@ public class ClientIntegrationTest {
   }
 
   private static void verifyNumActiveQueries(final int numQueries) {
-    KsqlEngine engine = (KsqlEngine) REST_APP.getEngine();
+    final KsqlEngine engine = (KsqlEngine) REST_APP.getEngine();
     assertThatEventually(engine::numberOfLiveQueries, is(numQueries));
   }
 
   private static void shouldReceiveStreamRows(
-      final Publisher<Row> publisher,
-      final boolean subscriberCompleted
+      final Publisher<Row> publisher
   ) {
-    shouldReceiveStreamRows(publisher, subscriberCompleted, TEST_NUM_ROWS);
+    shouldReceiveStreamRows(publisher, false, TEST_NUM_ROWS);
   }
 
   private static void shouldReceiveStreamRows(
@@ -1381,10 +1265,18 @@ public class ClientIntegrationTest {
   }
 
   private static void verifyStreamRows(final List<Row> rows, final int numRows) {
-    assertThat(rows, hasSize(numRows));
-    for (int i = 0; i < numRows; i++) {
+    for (int i = 0; i < Math.min(numRows, rows.size()); i++) {
       verifyStreamRowWithIndex(rows.get(i), i);
     }
+    if (rows.size() < numRows) {
+      fail("Expected " + numRows + " but only got " + rows.size());
+    } else if (rows.size() > numRows) {
+      final List<Row> extra = rows.subList(numRows, rows.size());
+      fail("Expected " + numRows + " but got " + rows.size() + ". The extra rows were: " + extra);
+    }
+
+    assertThat(rows, hasSize(numRows));
+
   }
 
   private static void verifyStreamRowWithIndex(final Row row, final int index) {
@@ -1549,8 +1441,7 @@ public class ClientIntegrationTest {
         testDataProvider.sourceName(),
         testDataProvider.topicName(),
         KEY_FORMAT.name(),
-        VALUE_FORMAT.name(),
-        false
+        VALUE_FORMAT.name()
     );
   }
 
@@ -1558,8 +1449,7 @@ public class ClientIntegrationTest {
       final String streamName,
       final String topicName,
       final String keyFormat,
-      final String valueFormat,
-      final boolean isWindowed
+      final String valueFormat
   ) {
     return new TypeSafeDiagnosingMatcher<StreamInfo>() {
       @Override
@@ -1578,37 +1468,31 @@ public class ClientIntegrationTest {
         if (!valueFormat.equals(actual.getValueFormat())) {
           return false;
         }
-        if (isWindowed != actual.isWindowed()) {
-          return false;
-        }
-        return true;
+        return !actual.isWindowed();
       }
 
       @Override
       public void describeTo(final Description description) {
         description.appendText(String.format(
             "streamName: %s. topicName: %s. keyFormat: %s. valueFormat: %s. isWindowed: %s",
-            streamName, topicName, keyFormat, valueFormat, isWindowed));
+            streamName, topicName, keyFormat, valueFormat, false));
       }
     };
   }
 
   private static Matcher<? super TableInfo> tableInfo(
-      final String tableName,
-      final String topicName,
       final String keyFormat,
-      final String valueFormat,
-      final boolean isWindowed
+      final String valueFormat
   ) {
     return new TypeSafeDiagnosingMatcher<TableInfo>() {
       @Override
       protected boolean matchesSafely(
           final TableInfo actual,
           final Description mismatchDescription) {
-        if (!tableName.equals(actual.getName())) {
+        if (!ClientIntegrationTest.AGG_TABLE.equals(actual.getName())) {
           return false;
         }
-        if (!topicName.equals(actual.getTopic())) {
+        if (!ClientIntegrationTest.AGG_TABLE.equals(actual.getTopic())) {
           return false;
         }
         if (!keyFormat.equals(actual.getKeyFormat())) {
@@ -1617,17 +1501,15 @@ public class ClientIntegrationTest {
         if (!valueFormat.equals(actual.getValueFormat())) {
           return false;
         }
-        if (isWindowed != actual.isWindowed()) {
-          return false;
-        }
-        return true;
+        return !actual.isWindowed();
       }
 
       @Override
       public void describeTo(final Description description) {
         description.appendText(String.format(
             "tableName: %s. topicName: %s. keyFormat: %s. valueFormat: %s. isWindowed: %s",
-            tableName, topicName, keyFormat, valueFormat, isWindowed));
+            ClientIntegrationTest.AGG_TABLE, ClientIntegrationTest.AGG_TABLE, keyFormat, valueFormat,
+            false));
       }
     };
   }
@@ -1646,10 +1528,7 @@ public class ClientIntegrationTest {
           return false;
         }
         final List<Integer> replicasPerPartition = actual.getReplicasPerPartition();
-        if (replicasPerPartition.size() != 1 || replicasPerPartition.get(0) != 1) {
-          return false;
-        }
-        return true;
+        return replicasPerPartition.size() == 1 && replicasPerPartition.get(0) == 1;
       }
 
       @Override

@@ -80,6 +80,13 @@ public class BlockingQueryPublisher extends BasePublisher<KeyValue<List<?>, Gene
         ctx.runOnContext(v -> sendComplete());
       }
     });
+    this.queue.setCompletionHandler(() -> {
+      complete = true;
+      // This allows us to finish the query immediately if the query is already fully streamed.
+      if (queue.isEmpty()) {
+        ctx.runOnContext(v -> sendComplete());
+      }
+    });
     this.queryHandle = queryHandle;
     queryHandle.onException(t -> ctx.runOnContext(v -> sendError(t)));
   }

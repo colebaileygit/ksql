@@ -81,13 +81,11 @@ import java.util.concurrent.TimeoutException;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import org.apache.kafka.clients.admin.Admin;
-import org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult;
 import org.apache.kafka.clients.admin.ListOffsetsOptions;
 import org.apache.kafka.clients.admin.ListOffsetsResult;
 import org.apache.kafka.clients.admin.OffsetSpec;
 import org.apache.kafka.clients.admin.TopicDescription;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
-import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.IsolationLevel;
 import org.apache.kafka.common.KafkaFuture;
 import org.apache.kafka.common.TopicPartition;
@@ -382,38 +380,6 @@ public class KsqlEngine implements KsqlExecutionContext, Closeable {
     );
 
     return new StreamPullQueryMetadata(transientQueryMetadata, endOffsets);
-  }
-
-  public boolean passedEndOffsets(final StreamPullQueryMetadata streamPullQueryMetadata) {
-
-    final Map<TopicPartition, Long> endOffsets = streamPullQueryMetadata.getEndOffsets();
-    final String queryApplicationId = streamPullQueryMetadata.getTransientQueryMetadata().getQueryApplicationId();
-    return passedEndOffsets(endOffsets, queryApplicationId);
-  }
-
-  private boolean passedEndOffsets(final Map<TopicPartition, Long> endOffsets,
-      final String queryApplicationId) {
-    try {
-      final ListConsumerGroupOffsetsResult result =
-          persistentAdminClient.listConsumerGroupOffsets(
-              queryApplicationId
-          );
-
-      final Map<TopicPartition, OffsetAndMetadata> metadataMap =
-          result.partitionsToOffsetAndMetadata().get();
-
-
-      for (final Entry<TopicPartition, Long> entry : endOffsets.entrySet()) {
-        final OffsetAndMetadata offsetAndMetadata = metadataMap.get(entry.getKey());
-        if (offsetAndMetadata == null || offsetAndMetadata.offset() < entry.getValue()) {
-          log.debug("SPQ waiting on " + entry + " at " + offsetAndMetadata);
-          return false;
-        }
-      }
-      return true;
-    } catch (final ExecutionException | InterruptedException e) {
-      throw new KsqlException(e);
-    }
   }
 
   private ImmutableMap<TopicPartition, Long> getQueryInputEndOffsets(

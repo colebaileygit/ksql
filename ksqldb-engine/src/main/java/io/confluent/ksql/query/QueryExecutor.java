@@ -540,6 +540,7 @@ final class QueryExecutor {
 
     if (buildResult instanceof KStreamHolder<?>) {
       final KStream<?, GenericRow> kstream = ((KStreamHolder<?>) buildResult).getStream();
+      // The list of "done partitions" is shared among all the stream threads and tasks.
       final ConcurrentHashSet<TopicPartition> donePartitions = new ConcurrentHashSet<>();
       kstream
           .process(new ProcessorSupplier<Object, GenericRow, Void, Void>() {
@@ -567,8 +568,17 @@ final class QueryExecutor {
 
                 @Override
                 public void process(final Record<Object, GenericRow> record) {
-                  // We ignore null values in streams as invalid data.
-                  if (record.value() != null) {
+                  final Optional<TopicPartition> topicPartition =
+                      context
+                          .recordMetadata()
+                          .map(m -> new TopicPartition(m.topic(), m.partition()));
+
+                  final boolean alreadyDone =
+                      topicPartition.isPresent() && donePartitions.contains(topicPartition.get());
+
+                  // We ignore null values in streams as invalid data and drop the record.
+                  // If we're already done with the current partition, we just drop the record.
+                  if (record.value() != null && !alreadyDone) {
                     queue.acceptRow(null, record.value());
                   }
 
@@ -577,23 +587,22 @@ final class QueryExecutor {
 
                 private void checkCompletion() {
                   if (endOffsets.isPresent()) {
-                    final Map<TopicPartition, OffsetAndMetadata> currentPositions = getCurrentPositions();
-                    for (final Entry<TopicPartition, Long> entry : endOffsets.get().entrySet()) {
-                      if (currentPositions.containsKey(entry.getKey())) {
-                        final OffsetAndMetadata current = currentPositions.get(entry.getKey());
-                        if (current != null && current.offset() >= entry.getValue()) {
-                          queue.complete();
-                          break;
+                    final Map<TopicPartition, OffsetAndMetadata> currentPositions =
+                        getCurrentPositions();
+
+                    for (final Entry<TopicPartition, Long> end : endOffsets.get().entrySet()) {
+                      if (currentPositions.containsKey(end.getKey())) {
+                        final OffsetAndMetadata current = currentPositions.get(end.getKey());
+                        if (current != null && current.offset() >= end.getValue()) {
+                          donePartitions.add(end.getKey());
                         }
                       }
                     }
+                    // if we're completely done with this query, then call the completion handler.
+                    if (ImmutableSet.copyOf(donePartitions).equals(endOffsets.get().keySet())) {
+                      queue.complete();
+                    }
                   }
-                }
-
-                private Long getCurrentPosition(final TopicPartition topicPartition) {
-                  final OffsetAndMetadata offsetAndMetadata =
-                      getCurrentPositions().get(topicPartition);
-                  return offsetAndMetadata == null ? null : offsetAndMetadata.offset();
                 }
 
                 private Map<TopicPartition, OffsetAndMetadata> getCurrentPositions() {
