@@ -84,7 +84,8 @@ public class PullQueryQueue implements BlockingRowQueue {
 
   @Override
   public void setCompletionHandler(final CompletionHandler completionHandler) {
-    // not used in pull queries.
+    // not currently used in pull queries, although future refactoring might be able to
+    // take advantage of this mechanism.
   }
 
   @Override

@@ -75,7 +75,7 @@ class QueryStreamWriter implements StreamingOutput {
     this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper");
     this.disconnectCheckInterval = disconnectCheckInterval;
     this.queryMetadata = Objects.requireNonNull(queryMetadata, "queryMetadata");
-    this.queryMetadata.setLimitHandler(new LimitHandler());
+    this.queryMetadata.setLimitHandler(() -> limitReached = true);
     this.queryMetadata.setCompletionHandler(() -> complete = true);
     this.queryMetadata.setUncaughtExceptionHandler(new StreamsExceptionHandler());
     this.tombstoneFactory = TombstoneFactory.create(queryMetadata);
@@ -223,10 +223,4 @@ class QueryStreamWriter implements StreamingOutput {
     }
   }
 
-  private class LimitHandler implements io.confluent.ksql.query.LimitHandler {
-    @Override
-    public void limitReached() {
-      limitReached = true;
-    }
-  }
 }

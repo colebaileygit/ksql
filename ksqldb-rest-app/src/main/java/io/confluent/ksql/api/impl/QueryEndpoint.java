@@ -229,9 +229,9 @@ public class QueryEndpoint {
 
     if (QueryCapacityUtil.exceedsPushQueryCapacity(ksqlEngine, ksqlRestConfig)) {
       QueryCapacityUtil.throwTooManyActivePushQueriesException(
-          ksqlEngine,
-          ksqlRestConfig,
-          statement.getStatementText()
+              ksqlEngine,
+              ksqlRestConfig,
+              statement.getStatementText()
       );
     }
 
@@ -252,6 +252,8 @@ public class QueryEndpoint {
       final ConfiguredStatement<Query> statement,
       final WorkerExecutor workerExecutor
   ) {
+    // Limits and metrics will be in follow-on PRs.
+
     final BlockingQueryPublisher publisher = new BlockingQueryPublisher(context, workerExecutor);
 
     final StreamPullQueryMetadata metadata =

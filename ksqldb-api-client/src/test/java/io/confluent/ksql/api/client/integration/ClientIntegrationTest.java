@@ -332,7 +332,7 @@ public class ClientIntegrationTest {
     }
 
     for (final StreamedQueryResult streamedQueryResult : streamedQueryResults) {
-      shouldReceiveStreamRows(streamedQueryResult);
+      shouldReceiveStreamRows(streamedQueryResult, false);
     }
 
     for (final StreamedQueryResult streamedQueryResult : streamedQueryResults) {
@@ -350,7 +350,7 @@ public class ClientIntegrationTest {
     assertThat(streamedQueryResult.columnTypes(), is(TEST_COLUMN_TYPES));
     assertThat(streamedQueryResult.queryID(), is(notNullValue()));
 
-    shouldReceiveStreamRows(streamedQueryResult);
+    shouldReceiveStreamRows(streamedQueryResult, false);
 
     assertThat(streamedQueryResult.isComplete(), is(false));
   }
@@ -776,7 +776,7 @@ public class ClientIntegrationTest {
     // Then
     assertThatEventually(acksSubscriber::getValues, hasSize(numRows));
     for (int i = 0; i < numRows; i++) {
-      assertThat(acksSubscriber.getValues().get(i).seqNum(), is((long) i));
+      assertThat(acksSubscriber.getValues().get(i).seqNum(), is(Long.valueOf(i)));
     }
     assertThat(acksSubscriber.getError(), is(nullValue()));
     assertThat(acksSubscriber.isCompleted(), is(false));
@@ -793,7 +793,7 @@ public class ClientIntegrationTest {
     for (int i = 0; i < numRows; i++) {
       assertThat(rows.get(i).getKsqlObject("K"), is(new KsqlObject().put("F1", new KsqlArray().add("my_key_" + i))));
       assertThat(rows.get(i).getString("STR"), is("TEST_" + i));
-      assertThat(rows.get(i).getLong("LONG"), is((long) i));
+      assertThat(rows.get(i).getLong("LONG"), is(Long.valueOf(i)));
       assertThat(rows.get(i).getDecimal("DEC"), is(new BigDecimal("13.31")));
       assertThat(rows.get(i).getBytes("BYTES_"), is(new byte[]{0, 1, 2}));
       assertThat(rows.get(i).getKsqlArray("ARRAY"), is(new KsqlArray().add("v_" + i)));
@@ -973,7 +973,7 @@ public class ClientIntegrationTest {
 
     // Then
     assertThat("" + tables, tables, contains(
-        tableInfo(KEY_FORMAT.name(), VALUE_FORMAT.name())
+        tableInfo(AGG_TABLE, AGG_TABLE, KEY_FORMAT.name(), VALUE_FORMAT.name(), false)
     ));
   }
 
@@ -1246,9 +1246,10 @@ public class ClientIntegrationTest {
   }
 
   private static void shouldReceiveStreamRows(
-      final Publisher<Row> publisher
+      final Publisher<Row> publisher,
+      final boolean subscriberCompleted
   ) {
-    shouldReceiveStreamRows(publisher, false, TEST_NUM_ROWS);
+    shouldReceiveStreamRows(publisher, subscriberCompleted, TEST_NUM_ROWS);
   }
 
   private static void shouldReceiveStreamRows(
@@ -1275,6 +1276,7 @@ public class ClientIntegrationTest {
       fail("Expected " + numRows + " but got " + rows.size() + ". The extra rows were: " + extra);
     }
 
+    // not strictly necessary after the other checks, but just to specify the invariant
     assertThat(rows, hasSize(numRows));
 
   }
@@ -1441,7 +1443,8 @@ public class ClientIntegrationTest {
         testDataProvider.sourceName(),
         testDataProvider.topicName(),
         KEY_FORMAT.name(),
-        VALUE_FORMAT.name()
+        VALUE_FORMAT.name(),
+        false
     );
   }
 
@@ -1449,7 +1452,8 @@ public class ClientIntegrationTest {
       final String streamName,
       final String topicName,
       final String keyFormat,
-      final String valueFormat
+      final String valueFormat,
+      final boolean isWindowed
   ) {
     return new TypeSafeDiagnosingMatcher<StreamInfo>() {
       @Override
@@ -1468,31 +1472,37 @@ public class ClientIntegrationTest {
         if (!valueFormat.equals(actual.getValueFormat())) {
           return false;
         }
-        return !actual.isWindowed();
+        if (isWindowed != actual.isWindowed()) {
+          return false;
+        }
+        return true;
       }
 
       @Override
       public void describeTo(final Description description) {
         description.appendText(String.format(
             "streamName: %s. topicName: %s. keyFormat: %s. valueFormat: %s. isWindowed: %s",
-            streamName, topicName, keyFormat, valueFormat, false));
+            streamName, topicName, keyFormat, valueFormat, isWindowed));
       }
     };
   }
 
   private static Matcher<? super TableInfo> tableInfo(
+      final String tableName,
+      final String topicName,
       final String keyFormat,
-      final String valueFormat
+      final String valueFormat,
+      final boolean isWindowed
   ) {
     return new TypeSafeDiagnosingMatcher<TableInfo>() {
       @Override
       protected boolean matchesSafely(
           final TableInfo actual,
           final Description mismatchDescription) {
-        if (!ClientIntegrationTest.AGG_TABLE.equals(actual.getName())) {
+        if (!tableName.equals(actual.getName())) {
           return false;
         }
-        if (!ClientIntegrationTest.AGG_TABLE.equals(actual.getTopic())) {
+        if (!topicName.equals(actual.getTopic())) {
           return false;
         }
         if (!keyFormat.equals(actual.getKeyFormat())) {
@@ -1501,15 +1511,17 @@ public class ClientIntegrationTest {
         if (!valueFormat.equals(actual.getValueFormat())) {
           return false;
         }
-        return !actual.isWindowed();
+        if (isWindowed != actual.isWindowed()) {
+          return false;
+        }
+        return true;
       }
 
       @Override
       public void describeTo(final Description description) {
         description.appendText(String.format(
             "tableName: %s. topicName: %s. keyFormat: %s. valueFormat: %s. isWindowed: %s",
-            ClientIntegrationTest.AGG_TABLE, ClientIntegrationTest.AGG_TABLE, keyFormat, valueFormat,
-            false));
+            tableName, topicName, keyFormat, valueFormat, isWindowed));
       }
     };
   }
@@ -1528,7 +1540,10 @@ public class ClientIntegrationTest {
           return false;
         }
         final List<Integer> replicasPerPartition = actual.getReplicasPerPartition();
-        return replicasPerPartition.size() == 1 && replicasPerPartition.get(0) == 1;
+        if (replicasPerPartition.size() != 1 || replicasPerPartition.get(0) != 1) {
+          return false;
+        }
+        return true;
       }
 
       @Override

@@ -59,6 +59,11 @@ public class TransientQueryQueue implements BlockingRowQueue {
   }
 
   @Override
+  public void setQueuedCallback(final Runnable queuedCallback) {
+    this.queuedCallback = queuedCallback;
+  }
+
+  @Override
   public void setLimitHandler(final LimitHandler limitHandler) {
     this.limitHandler = limitHandler;
   }
@@ -66,11 +71,6 @@ public class TransientQueryQueue implements BlockingRowQueue {
   @Override
   public void setCompletionHandler(final CompletionHandler completionHandler) {
     this.completionHandler = completionHandler;
-  }
-
-  @Override
-  public void setQueuedCallback(final Runnable queuedCallback) {
-    this.queuedCallback = queuedCallback;
   }
 
   @Override
@@ -106,7 +106,7 @@ public class TransientQueryQueue implements BlockingRowQueue {
 
   public void acceptRow(final List<?> key, final GenericRow value) {
     try {
-      if (checkLimit()) {
+      if (passedLimit()) {
         return;
       }
 
@@ -114,12 +114,7 @@ public class TransientQueryQueue implements BlockingRowQueue {
 
       while (!closed) {
         if (rowQueue.offer(row, offerTimeoutMs, TimeUnit.MILLISECONDS)) {
-          if (updateAndCheckLimit()) {
-            limitHandler.limitReached();
-          }
-          if (queuedCallback != null) {
-            queuedCallback.run();
-          }
+          onQueued();
           break;
         }
       }
@@ -138,7 +133,7 @@ public class TransientQueryQueue implements BlockingRowQueue {
    */
   public boolean acceptRowNonBlocking(final List<?> key, final GenericRow value) {
     try {
-      if (checkLimit()) {
+      if (passedLimit()) {
         return true;
       }
 
@@ -148,12 +143,7 @@ public class TransientQueryQueue implements BlockingRowQueue {
         if (!rowQueue.offer(row, 0, TimeUnit.MILLISECONDS)) {
           return false;
         }
-        if (updateAndCheckLimit()) {
-          limitHandler.limitReached();
-        }
-        if (queuedCallback != null) {
-          queuedCallback.run();
-        }
+        onQueued();
         return true;
       }
     } catch (final InterruptedException e) {
@@ -168,17 +158,22 @@ public class TransientQueryQueue implements BlockingRowQueue {
     return closed;
   }
 
-  private boolean updateAndCheckLimit() {
-    return remaining != null && remaining.decrementAndGet() <= 0;
-  }
-
-  private boolean checkLimit() {
-    return remaining != null && remaining.get() <= 0;
-  }
-
   public void complete() {
     if (completionHandler != null) {
       completionHandler.complete();
     }
+  }
+
+  private void onQueued() {
+    if (remaining != null && remaining.decrementAndGet() <= 0) {
+      limitHandler.limitReached();
+    }
+    if (queuedCallback != null) {
+      queuedCallback.run();
+    }
+  }
+
+  private boolean passedLimit() {
+    return remaining != null && remaining.get() <= 0;
   }
 }

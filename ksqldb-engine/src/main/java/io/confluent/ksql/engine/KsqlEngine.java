@@ -354,7 +354,6 @@ public class KsqlEngine implements KsqlExecutionContext, Closeable {
             .putAll(statementOrig.getSessionConfig().getOverrides())
             .put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest")
             .put(StreamsConfig.NUM_STREAM_THREADS_CONFIG, 1)
-            .put(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG, 100)
             // There's no point in EOS, since this query only produces side effects.
             .put(StreamsConfig.PROCESSING_GUARANTEE_CONFIG, StreamsConfig.AT_LEAST_ONCE)
             .build()

@@ -532,9 +532,6 @@ final class QueryExecutor {
       final boolean excludeTombstones,
       final Optional<ImmutableMap<TopicPartition, Long>> endOffsets
   ) {
-    // If we are supposed to stop at the endOffsets, but we didn't get any, then we should
-    // stop immediately. Sadly, we could actually avoid starting the Streams app completely,
-    // but
     final TransientQueryQueue queue = new TransientQueryQueue(limit);
 
     if (buildResult instanceof KStreamHolder<?>) {
@@ -723,7 +720,19 @@ final class QueryExecutor {
         queue.acceptRow(null, record.value());
       }
 
-      checkCompletion();
+      if (topicPartition.isPresent()) {
+        checkCompletion(topicPartition.get());
+      }
+    }
+
+    private void checkCompletion(final TopicPartition topicPartition) {
+      if (endOffsets.isPresent()) {
+        final ImmutableMap<TopicPartition, Long> endOffsetsMap = endOffsets.get();
+        if (endOffsetsMap.containsKey(topicPartition)) {
+          final Map<TopicPartition, OffsetAndMetadata> currentPositions = getCurrentPositions();
+          checkCompletion(topicPartition, currentPositions, endOffsetsMap.get(topicPartition));
+        }
+      }
     }
 
     private void checkCompletion() {
@@ -732,12 +741,11 @@ final class QueryExecutor {
             getCurrentPositions();
 
         for (final Entry<TopicPartition, Long> end : endOffsets.get().entrySet()) {
-          if (currentPositions.containsKey(end.getKey())) {
-            final OffsetAndMetadata current = currentPositions.get(end.getKey());
-            if (current != null && current.offset() >= end.getValue()) {
-              donePartitions.add(end.getKey());
-            }
-          }
+          checkCompletion(
+              end.getKey(),
+              currentPositions,
+              end.getValue()
+          );
         }
         // if we're completely done with this query, then call the completion handler.
         if (ImmutableSet.copyOf(donePartitions).equals(endOffsets.get().keySet())) {
@@ -746,11 +754,21 @@ final class QueryExecutor {
       }
     }
 
+    private void checkCompletion(final TopicPartition topicPartition,
+        final Map<TopicPartition, OffsetAndMetadata> currentPositions, final Long end) {
+      if (currentPositions.containsKey(topicPartition)) {
+        final OffsetAndMetadata current = currentPositions.get(topicPartition);
+        if (current != null && current.offset() >= end) {
+          donePartitions.add(topicPartition);
+        }
+      }
+    }
+
     @SuppressWarnings("unchecked")
     private Map<TopicPartition, OffsetAndMetadata> getCurrentPositions() {
       // It might make sense to actually propose adding the concept of getting the
       // "current position" in the ProcessorContext, but for now we just expose it
-      // by reflection.
+      // by reflection. Obviously, this code is pretty brittle.
       try {
         if (context.getClass().equals(ProcessorContextImpl.class)) {
           final Field streamTask;
@@ -763,8 +781,11 @@ final class QueryExecutor {
           return (Map<TopicPartition, OffsetAndMetadata>)
               committableOffsetsAndMetadata.invoke(task);
         } else {
+          // Specifically, this will break if you try to run this processor in a
+          // unit test with a mock processor. Both KafkaStreams and the TopologyTestDriver
+          // use a ProcessorContextImpl, which should be the only way this processor gets run.
           throw new IllegalStateException(
-              "Expected only to run in a real Streams application"
+              "Expected only to run in the KafkaStreams or TopologyTestDriver runtimes."
           );
         }
       } catch (final NoSuchFieldException | IllegalAccessException
