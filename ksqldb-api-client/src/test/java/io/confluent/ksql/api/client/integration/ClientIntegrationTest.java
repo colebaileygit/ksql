@@ -425,6 +425,35 @@ public class ClientIntegrationTest {
   }
 
   @Test
+  public void shouldStreamPullQueryOnEmptyStreamSync() throws Exception {
+    // When
+    final StreamedQueryResult streamedQueryResult = client.streamQuery(
+        "SELECT * FROM " + EMPTY_TEST_STREAM + ";",
+        ImmutableMap.of(KsqlConfig.KSQL_QUERY_STREAM_PULL_QUERY_ENABLED, true)
+    ).get();
+
+    // Then
+    assertThat(streamedQueryResult.columnNames(), is(TEST_COLUMN_NAMES));
+    assertThat(streamedQueryResult.columnTypes(), is(TEST_COLUMN_TYPES));
+    assertThat(streamedQueryResult.queryID(), is(notNullValue()));
+
+    final List<Row> results = new LinkedList<>();
+    Row row;
+    while (true) {
+      row = streamedQueryResult.poll();
+      if (row == null) {
+        break;
+      } else {
+        results.add(row);
+      }
+    }
+
+    verifyStreamRows(results, 0);
+
+    assertThatEventually(streamedQueryResult::isComplete, is(true));
+  }
+
+  @Test
   public void shouldRejectPullQueryOnStreamByDefault() {
     // When
     final CompletableFuture<StreamedQueryResult> future = client.streamQuery(PULL_QUERY_ON_STREAM);

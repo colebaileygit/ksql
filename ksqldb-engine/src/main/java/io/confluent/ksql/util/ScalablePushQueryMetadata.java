@@ -114,7 +114,7 @@ public class ScalablePushQueryMetadata implements PushQueryMetadata {
 
   @Override
   public void setCompletionHandler(final CompletionHandler completionHandler) {
-    throw new RuntimeException("unexpected call");
+    rowQueue.setCompletionHandler(completionHandler);
   }
 
   @Override

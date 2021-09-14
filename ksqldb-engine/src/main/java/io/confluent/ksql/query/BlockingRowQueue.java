@@ -40,6 +40,10 @@ public interface BlockingRowQueue {
    */
   void setLimitHandler(LimitHandler limitHandler);
 
+  /**
+   * Sets a handler that will be called when the query completes.
+   * Replaces any previous handler.
+   */
   void setCompletionHandler(CompletionHandler completionHandler);
 
   /**
