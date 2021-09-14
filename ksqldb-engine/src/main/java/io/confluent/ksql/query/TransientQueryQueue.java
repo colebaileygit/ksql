@@ -151,7 +151,9 @@ public class TransientQueryQueue implements BlockingRowQueue {
         if (updateAndCheckLimit()) {
           limitHandler.limitReached();
         }
-        queuedCallback.run();
+        if (queuedCallback != null) {
+          queuedCallback.run();
+        }
         return true;
       }
     } catch (final InterruptedException e) {
